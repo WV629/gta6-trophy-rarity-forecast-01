@@ -60,6 +60,18 @@ RES_PRIOR = 0.04   # prior variance (0.2^2) in the blend weights
 SPAN_HALF = float(os.environ.get("MAKEFUN_SPAN_HALF", "12.0"))  # hours of history span that earns half trust
 TRUST_SCALE = float(os.environ.get("MAKEFUN_TRUST_SCALE", "3.0"))  # multiplier on the trust factor
 RES_SCALE = 0.25   # residual variance scale in the trust factor
+# Frozen-page refresh (dilution) regime: when the history is flat AND the
+# horizon is short, the case is the launch-night refresh regime the
+# practice cases sit in. Exophase's page is a stale snapshot: the
+# answering read refreshes it with a much larger tracked population, so
+# every rate falls by dilution. competition.yaml states the refresh read
+# at 04:30Z tracked 3,868 players (the frozen page: 638). New players had
+# hours, not days, so earners grow only a little: DILUTION_EARNER_GROWTH
+# is set so the median logit shift is about -1.5, the shift implied by the
+# house baseline's stated practice loss (~1.51, typical miss ~0.68pp).
+DILUTION_TRACKED = float(os.environ.get("MAKEFUN_DILUTION_TRACKED", "3868"))
+DILUTION_EARNER_GROWTH = float(os.environ.get("MAKEFUN_DILUTION_EARNER_GROWTH", "1.35"))
+DILUTION_MAX_HOURS = float(os.environ.get("MAKEFUN_DILUTION_MAX_HOURS", "6.0"))
 LAUNCH = datetime(2026, 11, 19, tzinfo=timezone.utc)
 
 
@@ -178,6 +190,21 @@ def forecast_trophy(series, horizon_days, target_h, trophy):
         window = pts[-3:]
     span = window[-1][0] - window[0][0]
     flat = max(r for _, r, _ in window) - min(r for _, r, _ in window) < 0.01
+
+    if flat and horizon_days * 24.0 <= DILUTION_MAX_HOURS:
+        # Frozen page, short horizon: the launch-night refresh regime.
+        # The reads are a stale snapshot; the answering read refreshes the
+        # page with a much larger tracked population, so every rate falls
+        # by dilution (earners barely grow, tracked jumps). The growth
+        # fits below are meaningless on flat data, and the uplift would
+        # point the wrong way, so answer the dilution directly.
+        n_last = series[-1][2] or 0
+        if n_last > 0:
+            e_last = max(0.0, last_rate) / 100.0 * n_last
+            rate_dil = 100.0 * e_last * DILUTION_EARNER_GROWTH / DILUTION_TRACKED
+            median = logit(rate_dil)
+            spread = math.sqrt(S0 * S0 + (SH * math.sqrt(horizon_days)) ** 2)
+            return median, spread
 
     preds = []  # (pred_logit, residual_std)
     # Model L: saturating logistic in time (primary for growing series)
